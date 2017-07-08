@@ -1,0 +1,74 @@
+---
+title: "House Prices"
+author: "Graham Parkes"
+date: "18/06/2017"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+title 1
+=======
+
+title 2
+-------
+
+
+## House Prices: Predicting Sale Prices Based On Characteristics
+
+This notebook explores the data set provided by kaggle [House Prices: Advanced Regression Techniques](https://www.kaggle.com/c/house-prices-advanced-regression-techniques).  The objective of this is to develop a model to predict sale prices based on the characteristics of each one.
+
+The dataset was explored using the following libraries: readr, purrr, dplyr, plyr, Alelia, tidyr, ggplots, stringr, gbm,caret and forcats.
+
+```{r echo=FALSE, message=FALSE}
+library(readr)
+library(purrr)
+library(plyr)
+library(dplyr)
+library(Amelia)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+library(gbm)
+library(forcats)
+library(caret)
+```
+
+The data was supplied as a CSV data set.
+
+```{r echo=FALSE, message=FALSE}
+house_raw <- read_csv('train.csv')
+```
+
+The data set contains details of `r nrow(house_raw)` properties with `r ncol(house_raw)-1` attributes.
+
+Not every house has every attribute, and some require cleaning.
+These items were not populated
+
+```{r}
+# check columns for na
+check_na <- function(f) {sum(is.na(f))}
+
+
+absent_data_cols <- summarise_all(house_raw,check_na)
+absent_data_cols_ind <- absent_data_cols[1,]>0
+absent_items <- t(absent_data_cols[,absent_data_cols_ind[1,]])
+absent_items <- cbind(absent_items,feature=row.names(absent_items))
+absent_items <- as.data.frame(absent_items,stringsAsFactors=FALSE) 
+names(absent_items)[1] <- "gaps"
+absent_items$gaps <- as.numeric(absent_items$gaps)
+absent_items <- absent_items[order(absent_items$gaps,decreasing = TRUE),]
+row.names(absent_items) <- NULL
+absent_items %>% ggplot() + geom_col(aes(reorder(feature,order(absent_items$gaps,decreasing = TRUE)),gaps,fill=gaps)) + coord_flip() + labs(title="Potential Data Gaps",x="Feature")
+
+
+```
+```{r echo=FALSE}
+
+```
+
