@@ -1,16 +1,115 @@
 library(readr)
 library(purrr)
 library(dplyr)
-library(Amelia)
 library(tidyr)
 library(ggplot2)
 library(stringr)
 library(gbm)
 library(forcats)
-library(caret)
-library(GGally)
-library(dummies)
+library(modelr)
+#library(psych)
+library(devtools)
+install_github("thepks/sapr")
+library(gptools)
 
+#functions
+# the evalaution method
+localRMSE <- function(pred, obs,model,lev) {sqrt(mean((log(pred) - log(obs))^2))}
+
+# convenience method used to rename  columns that start with numbers
+mod_name <- function(f) { if(!is.na(str_match(f,"^[0-9].*"))){paste0("val_",f)} else {f}}
+
+# check columns for na
+check_na <- function(f) {sum(is.na(f))}
+
+
+# function to clean data
+clean_data <- function (o) {
+
+  #alter names to start with char
+  names(o) <- lapply(names(o),mod_name)
+
+  absent_items <- sap_missing_values(o)
+
+  # Engineer values
+  o$age_indicator <- o$YrSold - o$YearBuilt
+  o$YearRemodAdd_indicator <- o$YrSold - o$YearRemodAdd
+  o$YearBuilt <- NULL
+  o$YearRemodAdd <- NULL
+  o$garage_age_indicator <- o$YrSold - o$GarageYrBlt
+  
+  o$GarageYrBlt <- NULL
+  #house_raw[house_no_gar,]$garage_age_indicator <- -1
+  
+  # Set some of the absents to None
+  
+  o[is.na(o$PoolQC),]$PoolQC <- 'No Pool'
+  o[is.na(o$Alley),]$Alley <- 'No Alley Access'
+  o[is.na(o$Fence),]$Fence <- 'No Fence'
+
+  house_no_bsmt <- is.na(o$BsmtQual)
+  o[house_no_bsmt,]$BsmtQual <- "No Basement"
+  o[house_no_bsmt,]$BsmtCond <- "No Basement"
+  o[house_no_bsmt,]$BsmtExposure <- "No Basement"
+  o[house_no_bsmt,]$BsmtFinType1 <- "No Basement"
+  o[house_no_bsmt,]$BsmtFinSF1 <- 0
+  o[house_no_bsmt,]$BsmBsmtFinType2 <- "No Basement"
+  o[house_no_bsmt,]$BsmtUnfSF <- 0
+  o[house_no_bsmt,]$TotalBsmtSF <- 0
+  o[is.na(o$BsmtFinType2),]$BsmtFinType2 <- "No 2nd Basement"
+
+  o[is.na(o$FireplaceQu),]$FireplaceQu <- 'No Fireplace'
+  
+  o[is.na(o$MiscFeature),]$MiscFeature <- 'None'
+  
+  house_no_electric <- is.na(o$Electrical) | o$Electrical < 1
+  if(sum(house_no_electric)>1) { o[is.na(house_no_electric),]$Electrical <- 0}
+  
+  
+  house_no_gar <- is.na(o$GarageType)
+  
+  o[house_no_gar,]$GarageCond <- "No Garage"
+  o[house_no_gar,]$GarageQual <- "No Garage"
+  o[house_no_gar,]$GarageFinish <- "No Garage"
+  o[house_no_gar,]$GarageType <- "No Garage"
+  o[house_no_gar,]$garage_age_indicator <- -1
+  o[house_no_gar,]$GarageCars <- 0
+  
+  o[is.na(o$LotFrontage),]$LotFrontage <- 0
+  
+  
+  iffy <- ifelse(is.na(o$MasVnrType) | o$MasVnrType=="None",TRUE,FALSE)
+  o[iffy,]$MasVnrArea <- 0
+  
+
+  # sort out the factors
+  fields_class <- sapply(o,class)
+  fields_class[["MSSubClass"]] <- "character"
+  fields_class <- as.data.frame(fields_class, attr(fields_class,"names"))
+  fields_class$Id <- attr(fields_class,"row.names")
+  char_fields <- fields_class[fields_class$fields_class == "character",]
+
+  absent_items <- sap_missing_values(o)
+  absent_char_items <- absent_items[(absent_items$feature) %in% char_fields$Id,]
+  absent_num_items <- absent_items[!(absent_items$feature %in% char_fields$id),]
+
+  cleanup <- cbind(absent_char_items$feature,"None")
+  absent_num_means <- as.list(colMeans(o[,!(names(o) %in% char_fields$Id)], na.rm=TRUE))
+  cleanup2 <- cbind(attr(absent_num_means,"name"),absent_num_means)
+  names(cleanup2) <- NULL
+  cleanup <- rbind(cleanup, cleanup2)
+  row.names(cleanup) <- cleanup[,1]
+  
+  o <- replace_na(o,as.list(cleanup[,2]))
+
+  
+  o[,char_fields$Id] <- lapply(o[,char_fields$Id],factor)
+    
+  return(o)
+  
+}
+
+# Read in raw data
 house_raw <- read_csv('train.csv')
 
 # number of houses
@@ -19,112 +118,278 @@ nrow(house_raw)
 #number of attributes
 ncol(house_raw)-1
 
-#alter names to start with char
-# alter the name 
-mod_name <- function(f) { if(!is.na(str_match(f,"^[0-9].*"))){paste0("val_",f)} else {f}}
-names(house_raw) <- lapply(names(house_raw),mod_name)
-
-
-
-# check columns for na
-# check columns for na
-check_na <- function(f) {sum(is.na(f))}
-
-absent_data_cols <- summarise_all(house_raw,check_na)
-absent_data_cols_ind <- absent_data_cols[1,]>0
-absent_items <- t(absent_data_cols[,absent_data_cols_ind[1,]])
-absent_items <- cbind(absent_items,feature=row.names(absent_items))
-absent_items <- as.data.frame(absent_items,stringsAsFactors=FALSE) 
-names(absent_items)[1] <- "gaps"
-absent_items$gaps <- as.numeric(absent_items$gaps)
-absent_items <- absent_items[order(absent_items$gaps,decreasing = TRUE),]
-row.names(absent_items) <- NULL
-absent_items %>% ggplot() + geom_col(aes(reorder(feature,order(absent_items$gaps,decreasing = TRUE)),gaps,fill=gaps)) + coord_flip() + labs(title="Potential Data Gaps", x="Feature")
-
-# Set some of the absents to None
-
-
-house_raw[is.na(house_raw$PoolQC),]$PoolQC <- 'None'
-house_raw[is.na(house_raw$Alley),]$Alley <- 'None'
-house_raw[is.na(house_raw$Fence),]$Fence <- 'None'
-house_raw[is.na(house_raw$FireplaceQu),]$FireplaceQu <- 'None'
-
-house_no_gar <- house_raw$GarageArea <1
-
-house_raw[house_no_gar,]$GarageCond <- "None"
-house_raw[house_no_gar,]$GarageQual <- "None"
-house_raw[house_no_gar,]$GarageFinish <- "None"
-house_raw[house_no_gar,]$GarageYrBlt <- "None"
-house_raw[house_no_gar,]$GarageType <- "None"
-
-house_no_bsmt <- house_raw$BsmtUnfSF < 1
-house_raw[house_no_bsmt,]$BsmtFinType1 <- "None"
-house_raw[house_no_bsmt,]$BsmtFinType2 <- "None"
-house_raw[house_no_bsmt,]$BsmtExposure <- "None"
-house_raw[house_no_bsmt,]$BsmtCond <- "None"
-house_raw[house_no_bsmt,]$BsmtQual <- "None"
-
-house_raw[is.na(house_raw$MiscFeature),]$MiscFeature <- 'None'
-
-house_raw[is.na(house_raw$LotFrontage),]$LotFrontage <- 0
-house_raw[is.na(house_raw$Electrical),]$Electrical <- 0
-
-# sort out the factors
-fields_class <- sapply(house_raw,class)
-char_fields <- fields_class[fields_class == "character"]
-house_char <- house_raw
-house_raw[names(char_fields)] <- lapply(house_raw[names(char_fields)],factor)
+house_raw <- clean_data(house_raw)
 
 # recheck
 
-absent_data_cols <- summarise_all(house_raw,check_na)
-absent_data_cols_ind <- absent_data_cols[1,]>0
-absent_items <- t(absent_data_cols[,absent_data_cols_ind[1,]])
-absent_items <- cbind(absent_items,feature=row.names(absent_items))
-absent_items <- as.data.frame(absent_items,stringsAsFactors=FALSE) 
-names(absent_items)[1] <- "gaps"
-absent_items$gaps <- as.numeric(absent_items$gaps)
-absent_items <- absent_items[order(absent_items$gaps,decreasing = TRUE),]
-row.names(absent_items) <- NULL
+absent_items <- sap_missing_values(house_raw)
 absent_items %>% ggplot() + geom_col(aes(reorder(feature,order(absent_items$gaps,decreasing = TRUE)),gaps,fill=gaps)) + coord_flip() + labs(title="Potential Data Gaps", x="Feature")
 
+absent_items
 
+# find numeric fields
+# then this is only good for numerics
+class_fields <- lapply(house_raw,class)
+factor_filter <- class_fields != "factor"
+numeric_fields <- names(house_raw)[factor_filter]
+
+# what about constant columns, all taken care of?
+apply(house_raw[,numeric_fields], 2, var, na.rm = TRUE)
+sum(apply(house_raw[,numeric_fields], 2, var, na.rm=TRUE) ==0)
 
 # split the data into 3 sets 60:20:20
 
+set.seed(11)
+training_data <- resample_partition(house_raw,c(train=0.55, trial=0.45))
 
-inTrain <- createDataPartition(house_raw$Id, p=0.6, times=1)
-training_data <- house_raw[inTrain$Resample1,]
-training_test_data <- house_raw [ - inTrain$Resample1,]
+# first reduce dimensions using pca
+# to do this going to use columns 2 to the SalePrice
 
-response_column <- which(names(house_raw) == 'SalePrice')
-varnames <- names(training_data)
+pca_data <- as.data.frame(training_data$train)
+
+# then this is only good for numerics
+pca_data <- pca_data[,factor_filter]
+response_column <- which(names(pca_data) == 'SalePrice')
+
+pca_data <- pca_data[,!(names(pca_data) %in% c("Id","SalePrice"))]
+
+
+# now in this set constant columns can occur
+drop_cols <- !near(apply(pca_data, 2, var, na.rm=TRUE),0.0)
+pca_data <- pca_data[,drop_cols]
+
+
+psaRes <- prcomp(pca_data, scale=TRUE, tol=0.1)
+
+# what columns extracts
+pcaCols <- sum(psaRes$sdev ^2 > 1)
+
+# ok now from original set remove all columns in pca_data
+
+orig <- as.data.frame(training_data$train)
+
+# save id and sale price
+orig_save <- as.data.frame(cbind(orig$Id,orig$SalePrice))
+names(orig_save)[1] <- "Id"
+names(orig_save)[2] <- "SalePrice"
+col_fil <- !names(orig) %in% numeric_fields
+
+# now for the false remove those columns
+orig <- orig[,col_fil]
+
+# and replace with the new x values
+orig <- cbind(orig,psaRes$x[,1:pcaCols],SalePrice = orig_save$SalePrice)
+
+varnames <- names(orig)
 varnames <- varnames[!varnames %in% c('Id','SalePrice')]
 varnames1 <- paste(varnames, collapse = "+")
 form <- as.formula(paste("SalePrice",varnames1,sep = "~"))
 
 set.seed(13)
-gbm_model <- gbm(form, training_data, distribution = "gaussian", n.trees = 3000, 
-                 bag.fraction = 0.75, cv.folds = 5, interaction.depth = 3, n.minobsinnode=1)
+# was 5000, depth 6 shrink .1 mnobs 10
+gbm_model <- gbm(form, orig, distribution = "gaussian", n.trees = 5000,
+                 train.fraction = 0.8, bag.fraction = 0.75, cv.folds = 5, 
+                 interaction.depth = 6, n.minobsinnode=1)
 
 summary(gbm_model) %>% filter(rel.inf>0.1) %>% ggplot() + geom_col(aes(reorder(var,rel.inf,descending=TRUE),rel.inf)) + coord_flip() + labs(title="Relative Influence", x="Variable")
 
 gbm_perf <- gbm.perf(gbm_model, method = "cv")
 
-predictions_gbm <- predict(gbm_model, newdata= training_test_data[, -response_column], 
+# most important parts of PC1
+attr(psaRes$rotation,"dimnames")[[1]][psaRes$rotation>0.1]
+
+# ok lets drop some attributes
+qe <- summary(gbm_model)
+fields_of_i <- qe$var[qe$rel.inf >0]
+varnames <- varnames[varnames %in% fields_of_i]
+varnames1 <- paste(varnames, collapse = "+")
+form <- as.formula(paste("SalePrice",varnames1,sep = "~"))
+# #
+set.seed(13)
+# # # was 5000, depth 6 shrink .1 mnobs 10
+gbm_model <- gbm(form, orig[,names(orig) %in% fields_of_i | names(orig) %in% c("SalePrice")], 
+                   distribution = "gaussian", n.trees = 5000,
+                   train.fraction = 0.8, bag.fraction = 0.75, cv.folds = 5, 
+                   interaction.depth = 6, n.minobsinnode=1)
+# #
+summary(gbm_model) %>% filter(rel.inf>0.1) %>% ggplot() + geom_col(aes(reorder(var,rel.inf,descending=TRUE),rel.inf)) + coord_flip() + labs(title="Relative Influence", x="Variable")
+# #
+gbm_perf <- gbm.perf(gbm_model, method = "cv")
+# 
+
+# apply same to the trial data
+##
+
+pca_trial <- as.data.frame(training_data$trial)
+
+# then this is only good for numerics
+trial_data <- pca_trial[,factor_filter]
+
+response_column2 <- which(names(trial_data) == 'SalePrice')
+
+trial_data <- trial_data[,!(names(trial_data) %in% c("Id","SalePrice"))]
+
+
+# now in this set constant columns could occur
+drop_cols <- !near(apply(trial_data, 2, var, na.rm=TRUE),0.0)
+trial_data <- trial_data[,drop_cols]
+
+psaTrial <- prcomp(trial_data, scale=TRUE, tol=0.1)
+
+# what columns extracts
+pcaTrialCols <- sum(psaTrial$sdev ^2 > 1)
+
+pcaCols == pcaTrialCols
+# ok now from original set remove all columns in pca_data
+
+origTrial <- as.data.frame(training_data$trial)
+
+# save id and sale price
+trial_save <- as.data.frame(cbind(origTrial$Id,origTrial$SalePrice))
+names(trial_save)[1] <- "Id"
+names(trial_save)[2] <- "SalePrice"
+col_fil <- !names(origTrial) %in% numeric_fields
+
+# now for the false remove those columns
+origTrial <- origTrial[,col_fil]
+
+# and replace with the new x values
+#origTrial <- cbind(origTrial,psaTrial$x[,1:pcaCols],trial_save)
+origTrial <- cbind(origTrial,psaTrial$x[,1:pcaCols])
+#model_data <- origTrial[,names(origTrial) %in% fields_of_i]
+##
+
+# now what is the response so I can remove it
+#trial_response_column <- which(names(origTrial) == 'SalePrice')
+#newdata= origTrial[, -trial_response_column]
+predictions_gbm <- predict(gbm_model, newdata= origTrial, 
                            n.trees = gbm_perf, type = "response")
 
-RMSE(predictions_gbm,training_test_data$SalePrice)
-
-ggplot() + geom_point(aes(training_test_data$SalePrice,predictions_gbm),position="jitter")+geom_smooth(aes(training_test_data$SalePrice,predictions_gbm))
-
-ggplot() + geom_point(aes(training_test_data$SalePrice,predictions_gbm),position="jitter")+geom_smooth(aes(training_test_data$SalePrice,predictions_gbm),method = "lm")+xlim(0.75e5,3e5)
 
 
-# try one hot encoding of all the character fields rather than factors
-# this is going to imapact these fields:
-fc1 <- which(sapply(house_char,class) == "character")
-print(paste(names(house_raw)[fc1],sep = " "))
+print(localRMSE(predictions_gbm,trial_save$SalePrice))
 
-house_dummy <- dummy.data.frame(house_char)
-# now form a formula
+ggplot() + geom_point(aes(trial_save$SalePrice,predictions_gbm),position="jitter")+geom_smooth(aes(trial_save$SalePrice,predictions_gbm))+geom_abline(slope=1,intercept=0,linetype="dashed",colour="red")+labs(title="Model Chart1")
+ggsave("result1.png",width=16, height=7)
+ggplot() + geom_point(aes(trial_save$SalePrice,predictions_gbm),position="jitter")+geom_smooth(aes(trial_save$SalePrice,predictions_gbm),method = "lm")+xlim(0,6e5)+ylim(0,6e5)+geom_abline(slope=1,intercept=0,linetype="dashed",colour="red")+labs(title="Model Chart 2")
+ggsave("result2.png",width=16, height=7)
+
+## ok try the test
+
+test_data <- read_csv("test2.csv")
+test_save_id <- test_data$Id
+test_save_data <- test_data
+
+## Now clean
+
+test_data <- clean_data(test_data)
+
+# recheck
+
+absent_items <- sap_missing_values(test_data)
+absent_items %>% ggplot() + geom_col(aes(reorder(feature,order(absent_items$gaps,decreasing = TRUE)),gaps,fill=gaps)) + coord_flip() + labs(title="Potential Data Gaps", x="Feature")
+
+absent_items
+
+response_column <- which(names(factor_filter) == 'SalePrice')
+test_factor_filter <- factor_filter[-response_column]
+
+test_data <- test_data[,test_factor_filter]
+
+test_data <- test_data[,-1]
+
+
+# now in this set constant columns can occur
+drop_cols <- !near(apply(test_data, 2, var, na.rm=TRUE),0.0)
+test_data <- test_data[,drop_cols]
+
+psaTest <- prcomp(test_data, scale=TRUE, tol=0.1)
+
+
+
+# what columns extracts
+pcaTestCols <- sum(psaTest$sdev ^2 > 1)
+
+pcaCols == pcaTestCols
+# ok now from original set remove all columns in pca_data
+
+origTest <- test_save_data
+
+# save id 
+col_fil <- !names(origTest) %in% numeric_fields
+
+# now for the false remove those columns
+origTest <- origTest[,col_fil]
+
+# and replace with the new x values
+origTest <- cbind(origTest,psaTest$x[,1:pcaCols])
+
+
+# drop the columns not used
+origTest <- origTest[,names(origTest) %in% fields_of_i]
+
+##
+
+predictions_gbm_test <- predict(gbm_model, newdata= origTest, 
+                           n.trees = gbm_perf, type = "response")
+
+r2 <- cbind("Id" = test_save_id,"SalePrice" = predictions_gbm_test)
+write.csv(r2,"result.csv",row.names = FALSE)
+
+print(r2)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###### Now try xgboost with sparse matrix
+# library(xgboost)
+# library(Matrix)
+# library(data.table)
+# 
+# # how is orig
+# absent_items <- sap_missing_values(orig)
+# absent_items %>% ggplot() + geom_col(aes(reorder(feature,order(absent_items$gaps,decreasing = TRUE)),gaps,fill=gaps)) + coord_flip() + labs(title="Potential Data Gaps", x="Feature")
+# 
+# nrow(absent_items)
+# 
+# sap_missing_values(orig)
+# 
+# 
+# train_df <- data.table(orig)
+# sparse_matrix <- sparse.model.matrix(SalePrice~.-1, data = train_df)
+# 
+# bst <- xgboost(data = sparse_matrix, label = orig$SalePrice, max_depth = 500,
+#                eta = 1, nthread = 2, nrounds = 26)
+# 
+# 
+# sparse_matrix2 <- sparse.model.matrix(SalePrice~.-1, data = origTrial)
+# 
+# pred <- predict(bst, sparse_matrix2)
+# 
+# localRMSE(pred,origTrial$SalePrice)
+
+### 
+
+#drop_cols <- !near(apply(origTest, 2, var, na.rm=TRUE),0.0)
+#test_data <- origTest[,drop_cols]
+
+
+#test_df <- data.table(cbind(test_data,SalePrice=NA))
+#sparse_matrix3 <- sparse.model.matrix(SalePrice ~ ., data = test_df)
+
+
+#pred <- predict(bst,  data.matrix(origTest))
+
+
