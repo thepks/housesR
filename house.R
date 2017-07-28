@@ -85,6 +85,8 @@ clean_data <- function (o) {
   # sort out the factors
   fields_class <- sapply(o,class)
   fields_class[["MSSubClass"]] <- "character"
+  fields_class[["OverallQual"]] <- "character"
+  fields_class[["OverallCond"]] <- "character"
   fields_class <- as.data.frame(fields_class, attr(fields_class,"names"))
   fields_class$Id <- attr(fields_class,"row.names")
   char_fields <- fields_class[fields_class$fields_class == "character",]
@@ -140,7 +142,7 @@ sum(apply(house_raw[,numeric_fields], 2, var, na.rm=TRUE) ==0)
 # split the data into 3 sets 60:20:20
 
 set.seed(11)
-training_data <- resample_partition(house_raw,c(train=0.55, trial=0.45))
+training_data <- resample_partition(house_raw,c(train=0.6, trial=0.4))
 
 # first reduce dimensions using pca
 # to do this going to use columns 2 to the SalePrice
