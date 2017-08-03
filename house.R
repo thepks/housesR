@@ -280,11 +280,12 @@ ggsave("result2.png",width=16, height=7)
 
 test_data <- read_csv("test2.csv")
 test_save_id <- test_data$Id
-test_save_data <- test_data
+
 
 ## Now clean
 
 test_data <- clean_data(test_data)
+test_save_data <- test_data
 
 # recheck
 
@@ -356,42 +357,40 @@ print(r2)
 
 
 ###### Now try xgboost with sparse matrix
-# library(xgboost)
-# library(Matrix)
-# library(data.table)
-# 
-# # how is orig
-# absent_items <- sap_missing_values(orig)
-# absent_items %>% ggplot() + geom_col(aes(reorder(feature,order(absent_items$gaps,decreasing = TRUE)),gaps,fill=gaps)) + coord_flip() + labs(title="Potential Data Gaps", x="Feature")
-# 
-# nrow(absent_items)
-# 
-# sap_missing_values(orig)
-# 
-# 
-# train_df <- data.table(orig)
-# sparse_matrix <- sparse.model.matrix(SalePrice~.-1, data = train_df)
-# 
-# bst <- xgboost(data = sparse_matrix, label = orig$SalePrice, max_depth = 500,
-#                eta = 1, nthread = 2, nrounds = 26)
-# 
-# 
-# sparse_matrix2 <- sparse.model.matrix(SalePrice~.-1, data = origTrial)
-# 
-# pred <- predict(bst, sparse_matrix2)
-# 
-# localRMSE(pred,origTrial$SalePrice)
+library(xgboost)
+library(Matrix)
+library(data.table)
 
-### 
+labels <- orig$SalePrice
+origTrial2 <- cbind(origTrial,SalePrice=trial_save$SalePrice)
+ts_label <- origTrial2$SalePrice
 
-#drop_cols <- !near(apply(origTest, 2, var, na.rm=TRUE),0.0)
-#test_data <- origTest[,drop_cols]
+new_tr <- model.matrix(~.+0,data = orig[,-orig$SalePrice]) 
+new_ts <- model.matrix(~.+0,data = origTrial2[,-origTrial2$SalePrice])
+
+#convert factor to numeric 
+labels <- as.numeric(labels)-1
+ts_label <- as.numeric(ts_label)-1
+
+dtrain <- xgb.DMatrix(data = new_tr,label = labels) 
+dtest <- xgb.DMatrix(data = new_ts,label=ts_label)
+
+bst <- xgboost(dtrain, max.depth = 4, eta = 1, nthread = 2, nround = 400)
+pred <- predict(bst, dtest)
+
+ggplot() + geom_point(aes(trial_save$SalePrice,pred),position="jitter")+geom_smooth(aes(trial_save$SalePrice,pred))+geom_abline(slope=1,intercept=0,linetype="dashed",colour="red")+labs(title="Model Chart1")
+ggsave("result1_xgboost.png",width=16, height=7)
+
+print(localRMSE(pred,trial_save$SalePrice))
+
+### now the res
 
 
-#test_df <- data.table(cbind(test_data,SalePrice=NA))
-#sparse_matrix3 <- sparse.model.matrix(SalePrice ~ ., data = test_df)
+test_tr <- model.matrix(~.+0,data = origTest) 
 
+dfntest <- xgb.DMatrix(data = test_tr)
 
-#pred <- predict(bst,  data.matrix(origTest))
-
+pred2 <- predict(bst, dfntest)
+r3 <- cbind("Id" = test_save_id,"SalePrice" = pred2)
+write.csv(r3,"resultxgb.csv",row.names = FALSE)
 
